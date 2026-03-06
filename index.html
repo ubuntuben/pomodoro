@@ -183,7 +183,7 @@
       letter-spacing: 0.05em; color: inherit;
       cursor: text; min-width: 0;
     }
-    .sched-name:focus {{ color: var(--text); }}
+    .sched-name:focus { color: var(--text); }
     li.complete .sched-name { pointer-events: none; }
 
     /* Running */
@@ -281,6 +281,51 @@
     .restart-btn.show { opacity: 1; pointer-events: all; }
     .restart-btn:hover { border-color: var(--muted); color: var(--text); }
 
+    .pause-btn {
+      margin-top: 1rem; display: none;
+      padding: 0.6rem 1.8rem; border: 1px solid var(--amber);
+      background: transparent; color: var(--amber);
+      font-family: 'DM Mono', monospace; font-size: 0.65rem;
+      letter-spacing: 0.2em; text-transform: uppercase;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .pause-btn:hover { background: rgba(212,168,67,0.1); }
+    .pause-btn.paused { border-color: var(--green); color: var(--green); }
+    .pause-btn.paused:hover { background: rgba(90,158,111,0.1); }
+
+    /* Task preview in setup */
+    .task-preview {
+      background: var(--surface); border: 1px solid var(--border);
+      border-top: none; padding: 0.5rem 0.9rem 0.7rem;
+    }
+    .task-preview-list { list-style: none; display: flex; flex-direction: column; gap: 0.25rem; }
+    .task-preview-list li {
+      display: flex; align-items: center; gap: 0.6rem;
+      font-family: 'DM Mono', monospace; font-size: 0.63rem;
+      letter-spacing: 0.05em; color: var(--muted);
+    }
+    .tp-time { min-width: 42px; color: var(--sub); font-size: 0.6rem; flex-shrink: 0; }
+    .tp-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--red); flex-shrink: 0; }
+    .tp-dot.rest { background: var(--blue); }
+    .tp-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tp-dur { font-size: 0.57rem; color: var(--border); margin-left: auto; letter-spacing: 0.04em; }
+
+    /* Sun angle color bands */
+    .sun-night   { background: rgba(74,143,181,0.07); }
+    .sun-safe    { background: rgba(90,158,111,0.09); }
+    .sun-danger  { background: rgba(224,92,58,0.10); }
+    .sun-icon    { font-size: 0.65rem; flex-shrink: 0; opacity: 0.75; margin-left: 2px; }
+
+    /* Location notice */
+    .loc-notice {
+      font-family: 'DM Mono', monospace; font-size: 0.6rem;
+      letter-spacing: 0.08em; color: var(--muted);
+      padding: 0.5rem 0.9rem; border: 1px solid var(--border);
+      border-top: none; background: var(--surface);
+      display: none;
+    }
+    .loc-notice.show { display: block; }
+
     @keyframes fadeUp {
       from { opacity: 0; transform: translateY(14px); }
       to   { opacity: 1; transform: translateY(0); }
@@ -320,6 +365,10 @@
         <span class="paste-count" id="pasteCount"></span>
       </div>
       <textarea class="paste-area" id="pasteList" placeholder="Email follow-ups&#10;Deep work: project proposal&#10;Review pull requests&#10;Team sync prep"></textarea>
+      <div id="taskPreviewWrap" class="task-preview" style="display:none;">
+        <ul class="task-preview-list" id="taskPreviewList"></ul>
+      </div>
+      <div class="loc-notice" id="locNotice"></div>
     </div>
 
     <button class="submit-btn" id="submitBtn">START SESSION</button>
@@ -344,6 +393,7 @@
     <div class="schedule-title">Session schedule</div>
     <ul class="schedule-list" id="scheduleList"></ul>
     <div class="done-banner" id="doneBanner">SESSION COMPLETE</div>
+    <button class="pause-btn" id="pauseBtn">⏸ Pause</button>
     <button class="restart-btn" id="restartBtn">↩ New session</button>
   </div>
 
@@ -453,6 +503,7 @@ document.getElementById('pasteList').addEventListener('input', function () {
     document.getElementById('pomCount').value = 4;
     updateEndTime();
     buildNameInputs();
+    document.getElementById('taskPreviewWrap').style.display = 'none';
     return;
   }
 
@@ -463,17 +514,133 @@ document.getElementById('pasteList').addEventListener('input', function () {
   document.getElementById('pomCount').value = capped;
   updateEndTime();
   buildNameInputs();
+  buildTaskPreview();
 });
 
-document.getElementById('startTime').addEventListener('input', updateEndTime);
-document.getElementById('pomCount').addEventListener('input', () => { updateEndTime(); buildNameInputs(); });
+// ── Sun angle ─────────────────────────────────────────────────────────────
+let userLat = null, userLon = null, locationDenied = false;
+
+function solarAltitudeDeg(date, lat, lon) {
+  // Standard solar position algorithm
+  const rad = Math.PI / 180;
+  const dayOfYear = Math.floor((date - new Date(date.getFullYear(), 0, 0)) / 86400000);
+  const B = (360 / 365) * (dayOfYear - 81) * rad;
+  const declination = 23.45 * Math.sin(B) * rad;
+  const eot = 9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B); // minutes
+  const lstMin = date.getHours() * 60 + date.getMinutes();
+  const solarNoonMin = 720 - (lon * 4) - eot; // approx, ignoring timezone offset correction
+  // Adjust for local timezone offset vs UTC
+  const tzOffsetMin = -date.getTimezoneOffset();
+  const solarTimeMin = lstMin + (lon * 4 + eot - tzOffsetMin + tzOffsetMin - tzOffsetMin);
+  // Simpler: solar time = clock time + equation of time correction + longitude correction
+  const clockMin = date.getHours() * 60 + date.getMinutes();
+  const solarMin = clockMin + eot + (lon - (date.getTimezoneOffset() / -60) * 15) * 4;
+  const hourAngle = (solarMin - 720) / 4 * rad;
+  const sinAlt = Math.sin(lat * rad) * Math.sin(declination) +
+                 Math.cos(lat * rad) * Math.cos(declination) * Math.cos(hourAngle);
+  return Math.asin(sinAlt) / rad;
+}
+
+function sunClass(date) {
+  if (userLat === null) return null;
+  const alt = solarAltitudeDeg(date, userLat, userLon);
+  if (alt <= 0) return 'sun-night';
+  if (alt <= 45) return 'sun-safe';
+  return 'sun-danger';
+}
+
+function sunIcon(date) {
+  if (userLat === null) return '';
+  const alt = solarAltitudeDeg(date, userLat, userLon);
+  if (alt <= 0) return '🌙';
+  if (alt <= 45) return '🌅';
+  return '☀️';
+}
+
+function requestLocation() {
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      userLat = pos.coords.latitude;
+      userLon = pos.coords.longitude;
+      locationDenied = false;
+      document.getElementById('locNotice').classList.remove('show');
+      buildTaskPreview();
+    },
+    () => {
+      locationDenied = true;
+      const n = document.getElementById('locNotice');
+      n.textContent = '📍 Location not shared — sun angle indicators unavailable. You can still proceed normally.';
+      n.classList.add('show');
+      buildTaskPreview();
+    },
+    { timeout: 8000 }
+  );
+}
+
+// ── Task preview ──────────────────────────────────────────────────────────
+function buildTaskPreview() {
+  const tv    = document.getElementById('startTime').value;
+  const count = parseInt(document.getElementById('pomCount').value) || 0;
+  const wrap  = document.getElementById('taskPreviewWrap');
+  const ul    = document.getElementById('taskPreviewList');
+
+  if (!tv || count < 1 || pomNames.filter(n => n.trim()).length === 0) {
+    wrap.style.display = 'none';
+    return;
+  }
+
+  // Request location on first preview build
+  if (userLat === null && !locationDenied) requestLocation();
+
+  const [hh, mm] = tv.split(':').map(Number);
+  const now = new Date();
+  const start = new Date(now);
+  start.setHours(hh, mm, 0, 0);
+  if (start <= now) start.setDate(start.getDate() + 1);
+
+  ul.innerHTML = '';
+  for (let i = 0; i < count; i++) {
+    const name = (pomNames[i] && pomNames[i].trim()) ? pomNames[i].trim() : 'Pomodoro ' + (i + 1);
+    const focusAt = new Date(start.getTime() + i * CYCLE_MS);
+    const restAt  = new Date(focusAt.getTime() + FOCUS_MS);
+
+    const fClass = sunClass(focusAt) || '';
+    const rClass = sunClass(restAt) || '';
+
+    const liF = document.createElement('li');
+    if (fClass) liF.classList.add(fClass);
+    liF.innerHTML =
+      '<span class="tp-time">' + fmtClock(focusAt) + '</span>' +
+      '<span class="tp-dot"></span>' +
+      '<span class="tp-name">' + name.replace(/</g,'&lt;') + '</span>' +
+      (sunIcon(focusAt) ? '<span class="sun-icon">' + sunIcon(focusAt) + '</span>' : '') +
+      '<span class="tp-dur">25 min</span>';
+    ul.appendChild(liF);
+
+    const liR = document.createElement('li');
+    if (rClass) liR.classList.add(rClass);
+    liR.innerHTML =
+      '<span class="tp-time">' + fmtClock(restAt) + '</span>' +
+      '<span class="tp-dot rest"></span>' +
+      '<span class="tp-name" style="color:var(--border)">' + name.replace(/</g,'&lt;') + ' · rest</span>' +
+      (sunIcon(restAt) ? '<span class="sun-icon">' + sunIcon(restAt) + '</span>' : '') +
+      '<span class="tp-dur">5 min</span>';
+    ul.appendChild(liR);
+  }
+
+  wrap.style.display = 'block';
+}
+document.getElementById('startTime').addEventListener('input', () => { updateEndTime(); buildTaskPreview(); });
+document.getElementById('pomCount').addEventListener('input', () => { updateEndTime(); buildNameInputs(); buildTaskPreview(); });
 updateEndTime();
 buildNameInputs();
 
 // ── State ─────────────────────────────────────────────────────────────────
 let tos = [], ticker = null;
+let paused = false, pausedAt = null, totalPausedMs = 0;
 const sched = (fn, d) => tos.push(setTimeout(fn, Math.max(0, d)));
-function clearAll() { tos.forEach(clearTimeout); tos = []; clearInterval(ticker); ticker = null; }
+function clearAll() { tos.forEach(clearTimeout); tos = []; clearInterval(ticker); ticker = null; paused = false; pausedAt = null; totalPausedMs = 0; }
 
 const bigTime    = document.getElementById('bigTime');
 const phaseLabel = document.getElementById('phaseLabel');
@@ -483,111 +650,93 @@ const progFocus  = document.getElementById('progFocus');
 const progRest   = document.getElementById('progRest');
 
 // ── Submit ────────────────────────────────────────────────────────────────
-document.getElementById('submitBtn').addEventListener('click', async () => {
-  const tv    = document.getElementById('startTime').value;
-  const count = parseInt(document.getElementById('pomCount').value);
-  if (!tv || !count || count < 1) return;
-  await initAudio();
+let sessionStart = null, sessionCount = 0, sessionNames = [], sessionBlocks = [];
 
-  const [hh, mm] = tv.split(':').map(Number);
-  const now = new Date();
-  const start = new Date(now);
-  start.setHours(hh, mm, 0, 0);
-  if (start <= now) start.setDate(start.getDate() + 1);
+function getVirtualElapsed() {
+  return Date.now() - sessionStart.getTime() - totalPausedMs;
+}
 
-  const waitMs = start - now;
-
-  const blocks = [];
+function scheduleSession(names, count, fromVirtualMs) {
+  // fromVirtualMs: current virtual elapsed (negative = still waiting)
   for (let i = 0; i < count; i++) {
-    const cycleStart = waitMs + i * CYCLE_MS;
-    blocks.push({ pom: i, type: 'focus', startMs: cycleStart, startAt: new Date(now.getTime() + cycleStart) });
-    blocks.push({ pom: i, type: 'rest',  startMs: cycleStart + FOCUS_MS, startAt: new Date(now.getTime() + cycleStart + FOCUS_MS) });
-  }
-
-  document.getElementById('setup').style.display   = 'none';
-  document.getElementById('running').style.display = 'block';
-  buildDots(count);
-
-  // Collect names before setup is hidden
-  const names = [];
-  for (let i = 0; i < count; i++) names.push(getPomName(i));
-
-  buildSchedule(blocks, names);
-
-  phaseLabel.textContent = 'STARTING AT ' + fmtClock(start);
-  statusLine.textContent = 'Session begins in…';
-  bigTime.className  = 'big-time waiting';
-  pomTitle.className = 'pom-title waiting';
-  pomTitle.textContent = names[0] || 'Pomodoro 1';
-  document.title = '⏳ Starting soon — Pomodoro';
-  resetProgress();
-
-  for (let i = 0; i < count; i++) {
-    const focusStart = waitMs + i * CYCLE_MS;
+    const focusStart = i * CYCLE_MS;          // virtual ms when focus begins
     const restStart  = focusStart + FOCUS_MS;
     const cycleEnd   = focusStart + CYCLE_MS;
     const isLast     = i === count - 1;
 
-    sched(() => {
-      play3(() => {
-        const name = names[i] || ('Pomodoro ' + (i + 1));
-        phaseLabel.textContent = name.toUpperCase() + ' · FOCUS';
-        pomTitle.className = 'pom-title focus';
-        pomTitle.textContent = name;
-        document.title = '🔴 ' + name + ' · Focus';
-        bigTime.className = 'big-time focus';
-        statusLine.textContent = 'Focus · 25 minutes';
-        setDot(i, 'focus');
-        setSchedState('focus-' + i, 'current-focus');
-      });
-    }, focusStart);
-
-    sched(() => {
-      play1(() => {
-        const name = names[i] || ('Pomodoro ' + (i + 1));
-        phaseLabel.textContent = name.toUpperCase() + ' · REST';
-        pomTitle.className = 'pom-title rest';
-        pomTitle.textContent = name;
-        document.title = '🔵 ' + name + ' · Rest';
-        bigTime.className = 'big-time rest';
-        statusLine.textContent = 'Rest · 5 minutes';
-        setDot(i, 'rest');
-        setSchedState('focus-' + i, 'complete');
-        setSchedState('rest-' + i,  'current-rest');
-      });
-    }, restStart);
-
-    sched(() => {
-      setDot(i, 'done');
-      setSchedState('rest-' + i, 'complete');
-      if (isLast) {
+    if (focusStart > fromVirtualMs) {
+      sched(() => {
+        if (paused) return;
         play3(() => {
-          phaseLabel.textContent = 'SESSION COMPLETE';
-          pomTitle.className = 'pom-title done';
-          pomTitle.textContent = 'Done';
-          document.title = '✅ Session Complete — Pomodoro';
-          bigTime.textContent = '0:00';
-          bigTime.className = 'big-time done';
-          resetProgress('done');
-          statusLine.textContent = 'Well done.';
-          clearInterval(ticker);
-          document.getElementById('doneBanner').classList.add('show');
-          document.getElementById('restartBtn').classList.add('show');
+          const name = names[i] || ('Pomodoro ' + (i + 1));
+          phaseLabel.textContent = name.toUpperCase() + ' · FOCUS';
+          pomTitle.className = 'pom-title focus';
+          pomTitle.textContent = name;
+          document.title = '🔴 ' + name + ' · Focus';
+          bigTime.className = 'big-time focus';
+          statusLine.textContent = 'Focus · 25 minutes';
+          setDot(i, 'focus');
+          setSchedState('focus-' + i, 'current-focus');
         });
-      } else {
-        const nextName = names[i + 1] || ('Pomodoro ' + (i + 2));
-        phaseLabel.textContent = 'NEXT POMODORO STARTING…';
-        pomTitle.className = 'pom-title waiting';
-        pomTitle.textContent = nextName;
-        document.title = '⏳ ' + nextName + ' starting…';
-        bigTime.className = 'big-time waiting';
-        statusLine.textContent = nextName + ' beginning…';
-      }
-    }, cycleEnd);
-  }
+      }, focusStart - fromVirtualMs);
+    }
 
+    if (restStart > fromVirtualMs) {
+      sched(() => {
+        if (paused) return;
+        play1(() => {
+          const name = names[i] || ('Pomodoro ' + (i + 1));
+          phaseLabel.textContent = name.toUpperCase() + ' · REST';
+          pomTitle.className = 'pom-title rest';
+          pomTitle.textContent = name;
+          document.title = '🔵 ' + name + ' · Rest';
+          bigTime.className = 'big-time rest';
+          statusLine.textContent = 'Rest · 5 minutes';
+          setDot(i, 'rest');
+          setSchedState('focus-' + i, 'complete');
+          setSchedState('rest-' + i, 'current-rest');
+        });
+      }, restStart - fromVirtualMs);
+    }
+
+    if (cycleEnd > fromVirtualMs) {
+      sched(() => {
+        if (paused) return;
+        setDot(i, 'done');
+        setSchedState('rest-' + i, 'complete');
+        if (isLast) {
+          play3(() => {
+            phaseLabel.textContent = 'SESSION COMPLETE';
+            pomTitle.className = 'pom-title done';
+            pomTitle.textContent = 'Done';
+            document.title = '✅ Session Complete — Pomodoro';
+            bigTime.textContent = '0:00';
+            bigTime.className = 'big-time done';
+            resetProgress('done');
+            statusLine.textContent = 'Well done.';
+            clearInterval(ticker); ticker = null;
+            document.getElementById('doneBanner').classList.add('show');
+            document.getElementById('restartBtn').classList.add('show');
+            document.getElementById('pauseBtn').style.display = 'none';
+          });
+        } else {
+          const nextName = names[i + 1] || ('Pomodoro ' + (i + 2));
+          phaseLabel.textContent = 'NEXT POMODORO STARTING…';
+          pomTitle.className = 'pom-title waiting';
+          pomTitle.textContent = nextName;
+          document.title = '⏳ ' + nextName + ' starting…';
+          bigTime.className = 'big-time waiting';
+          statusLine.textContent = nextName + ' beginning…';
+        }
+      }, cycleEnd - fromVirtualMs);
+    }
+  }
+}
+
+function startTicker(count) {
   ticker = setInterval(() => {
-    const elapsed = Date.now() - start.getTime();
+    if (paused) return;
+    const elapsed = getVirtualElapsed();
     if (elapsed < 0) {
       bigTime.textContent = fmtCountdown(-elapsed);
       resetProgress();
@@ -607,6 +756,107 @@ document.getElementById('submitBtn').addEventListener('click', async () => {
       progRest.style.width  = (restElapsed / REST_MS * 5 / 30) + '%';
     }
   }, 500);
+}
+
+document.getElementById('submitBtn').addEventListener('click', async () => {
+  const tv    = document.getElementById('startTime').value;
+  const count = parseInt(document.getElementById('pomCount').value);
+  if (!tv || !count || count < 1) return;
+  await initAudio();
+
+  const [hh, mm] = tv.split(':').map(Number);
+  const now = new Date();
+  const start = new Date(now);
+  start.setHours(hh, mm, 0, 0);
+  if (start <= now) start.setDate(start.getDate() + 1);
+
+  sessionStart = start;  // virtual elapsed = 0 at session start, negative while waiting
+  sessionCount = count;
+  totalPausedMs = 0;
+  paused = false;
+  pausedAt = null;
+
+  const waitMs = start - now;
+
+  const blocks = [];
+  for (let i = 0; i < count; i++) {
+    const cycleStart = i * CYCLE_MS;
+    blocks.push({ pom: i, type: 'focus', startMs: cycleStart, startAt: new Date(start.getTime() + cycleStart) });
+    blocks.push({ pom: i, type: 'rest',  startMs: cycleStart + FOCUS_MS, startAt: new Date(start.getTime() + cycleStart + FOCUS_MS) });
+  }
+
+  document.getElementById('setup').style.display   = 'none';
+  document.getElementById('running').style.display = 'block';
+  buildDots(count);
+
+  const names = [];
+  for (let i = 0; i < count; i++) names.push(getPomName(i));
+  sessionNames = names;
+  sessionBlocks = blocks;
+
+  buildSchedule(blocks, names);
+
+  phaseLabel.textContent = 'STARTING AT ' + fmtClock(start);
+  statusLine.textContent = 'Session begins in…';
+  bigTime.className  = 'big-time waiting';
+  pomTitle.className = 'pom-title waiting';
+  pomTitle.textContent = names[0] || 'Pomodoro 1';
+  document.title = '⏳ Starting soon — Pomodoro';
+  resetProgress();
+
+  const pauseBtn = document.getElementById('pauseBtn');
+  pauseBtn.style.display = 'inline-block';
+  pauseBtn.classList.remove('paused');
+  pauseBtn.textContent = '⏸ Pause';
+
+  scheduleSession(names, count, -waitMs);
+  startTicker(count);
+});
+
+// ── Pause / Resume ─────────────────────────────────────────────────────────
+document.getElementById('pauseBtn').addEventListener('click', () => {
+  const btn = document.getElementById('pauseBtn');
+  if (!paused) {
+    // Pause: freeze virtual clock, clear all timeouts
+    paused = true;
+    pausedAt = Date.now();
+    tos.forEach(clearTimeout); tos = [];
+    clearInterval(ticker); ticker = null;
+    btn.classList.add('paused');
+    btn.textContent = '▶ Resume';
+    statusLine.textContent = '⏸ Paused';
+    document.title = '⏸ Paused — Pomodoro';
+  } else {
+    // Resume: account for pause duration, re-schedule remaining events
+    const pauseDuration = Date.now() - pausedAt;
+    totalPausedMs += pauseDuration;
+    pausedAt = null;
+    paused = false;
+
+    const virtualNow = getVirtualElapsed();
+
+    // Re-schedule only future events from current virtual position
+    scheduleSession(sessionNames, sessionCount, virtualNow);
+    startTicker(sessionCount);
+
+    btn.classList.remove('paused');
+    btn.textContent = '⏸ Pause';
+
+    // Restore status label based on where we are
+    const elapsed = virtualNow;
+    if (elapsed < 0) {
+      statusLine.textContent = 'Session begins in…';
+    } else {
+      const cycleIdx = Math.min(Math.floor(elapsed / CYCLE_MS), sessionCount - 1);
+      const cycleElapsed = elapsed % CYCLE_MS;
+      const name = sessionNames[cycleIdx] || ('Pomodoro ' + (cycleIdx + 1));
+      if (cycleElapsed < FOCUS_MS) {
+        statusLine.textContent = 'Focus · 25 minutes';
+      } else {
+        statusLine.textContent = 'Rest · 5 minutes';
+      }
+    }
+  }
 });
 
 function resetProgress(state) {
@@ -639,15 +889,19 @@ function buildSchedule(blocks, names) {
   blocks.forEach(b => {
     const li = document.createElement('li');
     li.id = 'sched-' + b.type + '-' + b.pom;
+    const sc = sunClass(b.startAt);
+    if (sc) li.classList.add(sc);
     const sub  = b.type === 'focus' ? '25 min' : '5 min rest';
     const name = names[b.pom] || ('Pomodoro ' + (b.pom + 1));
     const displayName = b.type === 'rest' ? name + ' · Rest' : name;
+    const icon = sunIcon(b.startAt);
     li.innerHTML =
       '<span class="sched-time">' + fmtClock(b.startAt) + '</span>' +
       '<div class="sched-dot"></div>' +
       '<input class="sched-name" data-pom="' + b.pom + '" data-type="' + b.type + '" ' +
         'value="' + displayName.replace(/"/g, '&quot;') + '" ' +
         'placeholder="' + displayName.replace(/"/g, '&quot;') + '">' +
+      (icon ? '<span class="sun-icon">' + icon + '</span>' : '') +
       '<span class="sched-sub">' + sub + '</span>';
     ul.appendChild(li);
   });
@@ -677,6 +931,8 @@ document.getElementById('restartBtn').addEventListener('click', () => {
   document.getElementById('setup').style.display   = 'block';
   document.getElementById('doneBanner').classList.remove('show');
   document.getElementById('restartBtn').classList.remove('show');
+  document.getElementById('pauseBtn').style.display = 'none';
+  document.getElementById('taskPreviewWrap').style.display = 'none';
   document.getElementById('startTime').value = nextHalfHour();
   document.getElementById('pasteList').value = '';
   document.getElementById('pasteCount').textContent = '';
